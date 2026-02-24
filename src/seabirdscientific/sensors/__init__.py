@@ -1,0 +1,1 @@
+from seabirdscientific.sensors.temperature_sensor import TemperatureSensor
