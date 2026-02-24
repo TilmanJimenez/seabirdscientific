@@ -1,9 +1,9 @@
 """Functions for processing instrument data."""
-
 # Native imports
 from enum import Enum
 from datetime import datetime, timedelta
 from logging import getLogger
+from collections.abc import Callable
 from typing import List, Dict, Union
 from pathlib import Path
 import warnings
@@ -16,12 +16,10 @@ import xarray as xr
 # Sea-Bird imports
 from seabirdscientific.utils import WarnAllMembersMeta
 
-
 logger = getLogger(__name__)
 
 COUNTS_TO_VOLTS = 13107
 SECONDS_BETWEEN_EPOCH_AND_2000 = 946684800
-
 
 """Possible data types in hex files"""
 HEX_TYPE_TEMPERATURE = "temperature"
@@ -72,7 +70,6 @@ HEX_TYPE_SBE911_CONFIRM_STATUS = "SBE911 confirm status"
 HEX_TYPE_SBE911_MODEM_STATUS = "SBE911 modem status"
 HEX_TYPE_DATA_INTEGRITY = "data integrity"
 HEX_TYPE_SYSTEM_TIME = "system time"
-
 
 """Possible lengths for hex data types"""
 HEX_LEN_TEMPERATURE = 6
@@ -366,6 +363,172 @@ def read_hex_file(
 
     return dataset
 
+def read_hex_file_new(
+        filepath: Union[Path, str],
+        instrument_type: InstrumentType,
+        enabled_sensors: List[Sensors] = [],
+        moored_mode=False,
+        is_shallow=True,
+        frequency_channels_suppressed=0,
+        voltage_words_suppressed=0,
+) -> xr.Dataset:
+    delimiters, names = sensor_delimiters_by_instrument_type(enabled_sensors,
+                                                      instrument_type, moored_mode=moored_mode)
+    def hex_to_int(hex_word: str) -> int:
+        return int(hex_word, 16)
+
+    converters: Dict[int, Callable[[str], int]] = {
+        i: hex_to_int for i in range(len(delimiters))
+    }
+    data = np.genfromtxt(
+        filepath,
+        comments = "*",
+        delimiter=delimiters,
+        names = names,
+        dtype="<i8",
+        converters=converters,
+        deletechars = " ",
+    )
+    # Return xArray instead
+    return pd.DataFrame(data = data)
+
+
+def sensor_delimiters_by_instrument_type(enabled_sensors: list[Sensors], instrument_type: InstrumentType, moored_mode):
+    match instrument_type:
+        case InstrumentType.SBE19Plus:
+            return sbe19plus_sensor_format(enabled_sensors, moored_mode=moored_mode)
+        case InstrumentType.SBE16Plus:
+            return sbe19plus_sensor_format(enabled_sensors, True)
+        case InstrumentType.SBE39Plus | InstrumentType.SBE39PlusIM:
+            return sbe39_plus_sensor_format(enabled_sensors)
+        case _:
+            raise ValueError(f"Unknown instrument type: {instrument_type}")
+
+def sbe39_plus_sensor_format(enabled_sensors: list[Sensors] | None) -> tuple[list[int], list[str]]:
+    delimiters:list[int] = []
+    names: list[str] = []
+    # Add datetime (this will be a datetime "sensor")
+    delimiters.append(HEX_LEN_DATE_TIME)
+    names.append(HEX_TYPE_DATE_TIME)
+    # Add temperature
+    delimiters.append(HEX_LEN_TEMPERATURE)
+    names.append(HEX_TYPE_TEMPERATURE)
+
+    if enabled_sensors and Sensors.Pressure in enabled_sensors:
+        delimiters.append(HEX_LEN_PRESSURE)
+        names.append(HEX_TYPE_PRESSURE)
+
+        delimiters.append(HEX_LEN_TEMPERATURE_COMPENSATION)
+        names.append(HEX_TYPE_TEMPERATURE_COMPENSATION)
+
+    return delimiters, names
+
+def sbe19plus_sensor_format(enabled_sensors: list[Sensors] | None, moored_mode:bool = False) -> tuple[list[int], list[str]]:
+    delimiters: list[int] = []
+    names: list[str] = []
+
+    list_of_available_sensors = list(Sensors)
+    sorted_sensors = sorted(enabled_sensors, key = lambda _: list_of_available_sensors.index(_))
+    # Now we could add them in this order (if the sensors also contained the data of their length: see definition of Sensors)
+    for sensor in sorted_sensors:
+        match sensor:
+            case Sensors.Temperature:
+                delimiters.append(HEX_LEN_TEMPERATURE)
+                names.append(HEX_TYPE_TEMPERATURE)
+            case Sensors.Conductivity:
+                delimiters.append(HEX_LEN_CONDUCTIVITY)
+                names.append(HEX_TYPE_CONDUCTIVITY)
+            case Sensors.Pressure:
+                delimiters.append(HEX_LEN_PRESSURE)
+                names.append(HEX_TYPE_PRESSURE)
+                #This is a special case. So the match/case would be reduced to cases like this
+                delimiters.append(HEX_LEN_TEMPERATURE_COMPENSATION)
+                names.append(HEX_TYPE_TEMPERATURE_COMPENSATION)
+
+            case Sensors.ExtVolt0:
+                delimiters.append(HEX_LEN_VOLTAGE)
+                names.append(HEX_TYPE_EXTVOLT0)
+            case Sensors.ExtVolt1:
+                delimiters.append(HEX_LEN_VOLTAGE)
+                names.append(HEX_TYPE_EXTVOLT1)
+            case Sensors.ExtVolt2:
+                delimiters.append(HEX_LEN_VOLTAGE)
+                names.append(HEX_TYPE_EXTVOLT2)
+            case Sensors.ExtVolt3:
+                delimiters.append(HEX_LEN_VOLTAGE)
+                names.append(HEX_TYPE_EXTVOLT3)
+            case Sensors.ExtVolt4:
+                delimiters.append(HEX_LEN_VOLTAGE)
+                names.append(HEX_TYPE_EXTVOLT4)
+            case Sensors.ExtVolt5:
+                delimiters.append(HEX_LEN_VOLTAGE)
+                names.append(HEX_TYPE_EXTVOLT5)
+
+            case Sensors.SBE38:
+                delimiters.append(HEX_LEN_TEMPERATURE)
+                names.append(HEX_TYPE_SBE38_TEMPERATURE)
+            case Sensors.WETLABS:
+                delimiters.append(HEX_LEN_WETLABS_SINGLE_SENSOR)
+                names.append(HEX_TYPE_WETLABS0)
+
+                delimiters.append(HEX_LEN_WETLABS_SINGLE_SENSOR)
+                names.append(HEX_TYPE_WETLABS1)
+
+                delimiters.append(HEX_LEN_WETLABS_SINGLE_SENSOR)
+                names.append(HEX_TYPE_WETLABS2)
+            case Sensors.GTD:
+                delimiters.append(HEX_LEN_GTD_PRESSURE)
+                names.append(HEX_TYPE_GTD_PRESSURE)
+
+                delimiters.append(HEX_LEN_TEMPERATURE)
+                names.append(HEX_TYPE_GTD_TEMPERATURE)
+
+            case Sensors.DualGTD:
+                delimiters.append(HEX_LEN_GTD_PRESSURE)
+                names.append(HEX_TYPE_GTD_PRESSURE)
+
+                delimiters.append(HEX_LEN_TEMPERATURE)
+                names.append(HEX_TYPE_GTD_TEMPERATURE)
+
+                delimiters.append(HEX_LEN_GTD_PRESSURE)
+                names.append(HEX_TYPE_GTD_PRESSURE2)
+
+                delimiters.append(HEX_LEN_TEMPERATURE)
+                names.append(HEX_TYPE_GTD_TEMPERATURE2)
+
+            case Sensors.OPTODE:
+                delimiters.append(HEX_LEN_OPTODE_OXYGEN)
+                names.append(HEX_TYPE_OPTODE_OXYGEN)
+
+            case Sensors.SBE63:
+                delimiters.append(HEX_LEN_SBE63_PHASE)
+                names.append(HEX_TYPE_SBE63_PHASE)
+
+                delimiters.append(HEX_LEN_TEMPERATURE)
+                names.append(HEX_TYPE_SBE63_TEMPERATURE)
+
+            case Sensors.nmeaLatitude:
+                delimiters.append(HEX_LEN_NMEA_LATITUDE)
+                names.append(HEX_TYPE_NMEA_LATITUDE)
+
+            case Sensors.nmeaLocation:
+                delimiters.append(HEX_LEN_NMEA_LONGITUDE)
+                names.append(HEX_TYPE_NMEA_LONGITUDE)
+
+            case Sensors.statusAndSign:
+                delimiters.append(HEX_LEN_NMEA_STATUS_AND_SIGN)
+                # Does not exist in the definition, and we are probably not going to use it labeled, but we need it for splitting reasons.
+                names.append("NMEA STATUS AND SIGN")
+
+            case Sensors.nmeaTime:
+                delimiters.append(HEX_LEN_NMEA_TIME)
+                names.append(HEX_TYPE_NMEA_TIME)
+
+    if moored_mode:
+        delimiters.append(HEX_LEN_DATE_TIME)
+        names.append(HEX_TYPE_DATE_TIME)
+
+    return delimiters, names
 
 def _preallocate_dataset(
     hex_data: dict,
